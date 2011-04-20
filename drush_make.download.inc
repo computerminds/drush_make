@@ -413,8 +413,30 @@ function drush_make_download_git($name, $download, $download_location) {
   
   drush_make_mkdir($tmp_path . '/__git__/');
   
+  if (drush_get_option('gitcache', TRUE)) {
+    $short_url = drush_gitcache_url_hash($url);
+    $gitcache = drush_server_home() . '/.drush/gitcache-dm/' . $short_url;
+    drush_gitcache_check($gitcache);
+
+    drush_shell_cd_and_exec($gitcache, 'git remote show'); 
+    $cached_modules = drush_shell_exec_output();
+
+    if (!in_array($short_url, $cached_modules)) {
+      drush_gitcache_add_project($gitcache, $url);
+    }
+  }
+  
+  $command = "git clone";
+  
+  if (drush_get_option('gitcache', TRUE)) {
+    $command .= ' --reference ' . drush_escapeshellarg($gitcache);
+  }
+  if (drush_get_context('DRUSH_VERBOSE')) {
+    $command .= ' --verbose --progress';
+  }
+ 
   // clone the given repository
-  if (drush_shell_exec("git clone %s %s", $url, $tmp_location)) {
+  if (drush_shell_exec($command . " %s %s", $url, $tmp_location)) {
     drush_log(dt('%project cloned from %url.', array('%project' => $name, '%url' => $url)), 'ok');
   
     // GIT Checkout only work on a ready cloned repo. So we switch to branch or to tag (only if we have no branch) after cloneing.
@@ -493,6 +515,121 @@ function drush_make_download_git($name, $download, $download_location) {
   return FALSE;
 }
 
+/**
+ * Check for gitcache directory or create it.
+ *
+ * @param $gitcache The location of the gitcache directory.
+ */
+if (!function_exists('drush_gitcache_check')) {
+  function drush_gitcache_check($gitcache) {
+    if (is_dir(drush_server_home() . '/.drush')) {
+      drush_mkdir($gitcache);
+      if (!drush_shell_cd_and_exec($gitcache, 'test $(git rev-parse --is-bare-repository) == "true"')) {
+        drush_shell_cd_and_exec($gitcache, 'git init --bare');
+        drush_shell_cd_and_exec($gitcache, 'git config core.compression 1');
+      }
+    }
+  }
+}
+
+/**
+ * Add a project to the cache.
+ *
+ * @param $gitcache The location of the gitcache directory.
+ * @param $request The project array with name, base and full (final) paths.
+ * @param $release The release details array from drupal.org
+ */
+if (!function_exists('drush_gitcache_add_project')) {
+  function drush_gitcache_add_project($gitcache, $url) {
+    drush_log(dt('Adding gitcache repo for @url', array('@url' => $url)));
+    $name = drush_gitcache_url_hash($url);
+    $tmpdir = drush_tempdir();
+    $command = 'git clone --bare ';
+    if (drush_get_context('DRUSH_VERBOSE')) {
+      $command .= ' --verbose --progress ';
+    }
+    $command .= '%s';
+    if (drush_shell_cd_and_exec($tmpdir, $command, $url)) {
+      // Then fetch from the temporary dir into our main repo.
+      drush_shell_cd_and_exec($gitcache, 'git remote add %s %s && git fetch %s --tags', $name, $tmpdir, $name);
+  
+      // Then change the remote URL and fetch normally.
+      drush_shell_cd_and_exec($gitcache, 'git remote set-url %s %s && git fetch %s --tags', $name, $url, $name); 
+    }
+  }
+}
+
+function drush_gitcache_url_hash($url) {
+  $url = preg_replace('#\W+#', '_', $url);
+  return $url;
+}
+
+if (!function_exists('drush_mkdir')) {
+  function drush_mkdir($path) {
+    return is_dir($path) || (drush_mkdir(dirname($path)) && drush_shell_exec('mkdir %s', $path));
+  }
+}
+
+if (!function_exists('drush_tempdir')) {
+  function drush_tempdir() {
+    $tmp_dir = rtrim(drush_find_tmp(), DIRECTORY_SEPARATOR);
+    $tmp_dir .= '/' . 'drush_tmp_' . time();
+  
+    drush_mkdir($tmp_dir);
+    drush_register_file_for_deletion($tmp_dir);
+  
+    return $tmp_dir;
+  }
+}
+
+if (!function_exists('drush_find_tmp')) {
+  function drush_find_tmp() {
+    static $temporary_directory = NULL;
+  
+    if (is_null($temporary_directory)) {
+      $directories = array();
+  
+      // Operating system specific dirs.
+      if (substr(PHP_OS, 0, 3) == 'WIN') {
+        $directories[] = 'c:\\windows\\temp';
+        $directories[] = 'c:\\winnt\\temp';
+      }
+      else {
+        $directories[] = '/tmp';
+      }
+      // This function exists in PHP 5 >= 5.2.1, but drush
+      // requires PHP 5 >= 5.2.0, so we check for it.
+      if (function_exists('sys_get_temp_dir')) {
+        $directories[] = sys_get_temp_dir();
+      }
+  
+      foreach ($directories as $directory) {
+        if (is_dir($directory) && is_writable($directory)) {
+          $temporary_directory = $directory;
+          break;
+        }
+      }
+  
+      if (empty($temporary_directory)) {
+        // If no directory has been found, create one in cwd.
+        $temporary_directory = drush_cwd() . '/tmp';
+        drush_mkdir($temporary_directory);
+        if (!is_dir($directory)) {
+          return drush_set_error('DRUSH_UNABLE_TO_CREATE_TMP_DIR', dt("Unable to create a temporary directory."));
+        }
+        drush_register_file_for_deletion($temporary_directory);
+      }
+    }
+  
+    return $temporary_directory;
+  }
+}
+
+if (!function_exists('drush_escapeshellarg')) {
+  function drush_escapeshellarg($arg) {
+    return escapeshellarg($arg);
+  }
+}
 function drush_make_download_bzr($name, $download, $download_location) {
   $tmp_path = drush_make_tmp();
   $tmp_location = $tmp_path . '/__bzr__/' . basename($download_location);
